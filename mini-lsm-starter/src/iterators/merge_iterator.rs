@@ -59,7 +59,36 @@ pub struct MergeIterator<I: StorageIterator> {
 
 impl<I: StorageIterator> MergeIterator<I> {
     pub fn create(iters: Vec<Box<I>>) -> Self {
-        unimplemented!()
+        if iters.is_empty() {
+            return Self {
+                iters: BinaryHeap::new(), //当前第一个之后所有的有效迭代器
+                current: None,            //目前第一个有效迭代器
+            };
+        }
+
+        let mut heap = BinaryHeap::new();
+
+        if iters.iter().all(|x| !x.is_valid()) {
+            // All invalid, select the last one as the current.
+            let mut iters = iters;
+            return Self {
+                iters: heap,
+                current: Some(HeapWrapper(0, iters.pop().unwrap())),
+            };
+        }
+
+        //select which are vaild
+        for (idx, iter) in iters.into_iter().enumerate() {
+            if iter.is_valid() {
+                heap.push(HeapWrapper(idx, iter));
+            }
+        }
+
+        let current = heap.pop().unwrap();
+        Self {
+            iters: heap,
+            current: Some(current),
+        }
     }
 }
 

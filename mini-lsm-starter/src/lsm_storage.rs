@@ -21,8 +21,9 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::AtomicUsize;
 
-use anyhow::Result;
+use anyhow::{Ok, Result};
 use bytes::Bytes;
+use farmhash::fingerprint32;
 use parking_lot::{Mutex, MutexGuard, RwLock};
 
 use crate::block::Block;
@@ -30,11 +31,16 @@ use crate::compact::{
     CompactionController, CompactionOptions, LeveledCompactionController, LeveledCompactionOptions,
     SimpleLeveledCompactionController, SimpleLeveledCompactionOptions, TieredCompactionController,
 };
+use crate::iterators::StorageIterator;
+use crate::iterators::concat_iterator::SstConcatIterator;
+use crate::iterators::merge_iterator::{self, MergeIterator};
+use crate::iterators::two_merge_iterator::TwoMergeIterator;
+use crate::key::KeySlice;
 use crate::lsm_iterator::{FusedIterator, LsmIterator};
 use crate::manifest::Manifest;
 use crate::mem_table::MemTable;
 use crate::mvcc::LsmMvccInner;
-use crate::table::SsTable;
+use crate::table::{SsTable, SsTableIterator};
 
 pub type BlockCache = moka::sync::Cache<(usize, usize), Arc<Block>>;
 
@@ -126,6 +132,10 @@ impl LsmStorageOptions {
             serializable: false,
         }
     }
+}
+
+fn key_within(search_key: &[u8], table_begin: KeySlice, table_end: KeySlice) -> bool {
+    table_begin.raw_ref() <= search_key && table_end.raw_ref() >= table_end.raw_ref()
 }
 
 #[derive(Clone, Debug)]
@@ -298,7 +308,30 @@ impl LsmStorageInner {
 
     /// Get a key from the storage. In day 7, this can be further optimized by using a bloom filter.
     pub fn get(&self, _key: &[u8]) -> Result<Option<Bytes>> {
-        unimplemented!()
+        let guard = self.state.read();
+        let snapshot = &guard;
+
+        // Search on the current memtable.
+        if let Some(value) = snapshot.memtable.get(_key) {
+            if value.is_empty() {
+                // found tomestone, return key not exists
+                return Ok(None);
+            }
+            return Ok(Some(value));
+        }
+
+        // if fail to search on the current mmt , search on immutable memtables.
+        for memtable in snapshot.imm_memtables.iter() {
+            if let Some(value) = memtable.get(_key) {
+                if value.is_empty() {
+                    // found tomestone, return key not exists
+                    return Ok(None);
+                }
+                return Ok(Some(value));
+            }
+        }
+
+        Ok(None)
     }
 
     /// Write a batch of data into the storage. Implement in week 2 day 7.
@@ -308,12 +341,24 @@ impl LsmStorageInner {
 
     /// Put a key-value pair into the storage by writing into the current memtable.
     pub fn put(&self, _key: &[u8], _value: &[u8]) -> Result<()> {
-        unimplemented!()
+        let key = _key.as_ref();
+        let value = _value.as_ref();
+        assert!(!key.is_empty(), "key cannot be empty");
+        assert!(!value.is_empty(), "value cannot be empty");
+
+        let guard = self.state.read();
+        guard.memtable.put(key, value)?;
+        Ok(())
     }
 
     /// Remove a key from the storage by writing an empty value.
     pub fn delete(&self, _key: &[u8]) -> Result<()> {
-        unimplemented!()
+        let key = _key.as_ref();
+        assert!(!key.is_empty(), "key cannot be empty");
+
+        let guard = self.state.read();
+        guard.memtable.put(key, b"")?;
+        Ok(())
     }
 
     pub(crate) fn path_of_sst_static(path: impl AsRef<Path>, id: usize) -> PathBuf {
