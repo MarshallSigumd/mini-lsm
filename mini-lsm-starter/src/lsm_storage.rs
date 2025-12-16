@@ -434,11 +434,24 @@ impl LsmStorageInner {
     }
 
     /// Create an iterator over a range of keys.
+    /// 创建范围扫描迭代器，只扫描内存表中的数据，返回指定键范围内的有序数据流。
     pub fn scan(
         &self,
-        _lower: Bound<&[u8]>,
-        _upper: Bound<&[u8]>,
+        lower: Bound<&[u8]>,
+        upper: Bound<&[u8]>,
     ) -> Result<FusedIterator<LsmIterator>> {
-        unimplemented!()
+        let snapshot = {
+            let guard = self.state.read();
+            Arc::clone(&guard)
+        };
+
+        let mut mmt_iters = Vec::with_capacity(snapshot.imm_memtables.len() + 1);
+        mmt_iters.push(Box::new(snapshot.memtable.scan(lower, upper)));
+        for mmt in snapshot.imm_memtables.iter() {
+            mmt_iters.push(Box::new(mmt.scan(lower, upper)));
+        }
+
+        let iter = MergeIterator::create(mmt_iters);
+        Ok(FusedIterator::new(LsmIterator::new(iter)?))
     }
 }
