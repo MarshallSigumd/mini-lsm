@@ -346,8 +346,14 @@ impl LsmStorageInner {
         assert!(!key.is_empty(), "key cannot be empty");
         assert!(!value.is_empty(), "value cannot be empty");
 
-        let guard = self.state.read();
-        guard.memtable.put(key, value)?;
+        let size;
+        {
+            let guard = self.state.read();
+            guard.memtable.put(key, value)?;
+            size = guard.memtable.approximate_size();
+        }
+
+        self.whether_freeze(size)?;
         Ok(())
     }
 
@@ -356,8 +362,26 @@ impl LsmStorageInner {
         let key = _key.as_ref();
         assert!(!key.is_empty(), "key cannot be empty");
 
-        let guard = self.state.read();
-        guard.memtable.put(key, b"")?;
+        let size;
+        {
+            let guard = self.state.read();
+            guard.memtable.put(key, b"")?;
+            size = guard.memtable.approximate_size();
+        }
+        self.whether_freeze(size)?;
+        Ok(())
+    }
+
+    fn whether_freeze(&self, approximate_size: usize) -> Result<()> {
+        if approximate_size >= self.options.target_sst_size {
+            let slock = self.state_lock.lock();
+            let guard = self.state.read();
+            // the memtable could have already been frozen, check again to ensure we really need to freeze
+            if guard.memtable.approximate_size() >= self.options.target_sst_size {
+                drop(guard);
+                self.force_freeze_memtable(&slock)?;
+            }
+        }
         Ok(())
     }
 
@@ -383,7 +407,20 @@ impl LsmStorageInner {
 
     /// Force freeze the current memtable to an immutable memtable
     pub fn force_freeze_memtable(&self, _state_lock_observer: &MutexGuard<'_, ()>) -> Result<()> {
-        unimplemented!()
+        let id = self.next_sst_id();
+        let mmt = Arc::new(MemTable::create(id));
+
+        let old_mmt;
+        {
+            let mut guard = self.state.write();
+            let mut snapshot = guard.as_ref().clone();
+            old_mmt = std::mem::replace(&mut snapshot.memtable, mmt);
+            snapshot.imm_memtables.insert(0, old_mmt);
+            *guard = Arc::new(snapshot)
+            //逻辑：首先先给写锁，克隆出一个快照，然后对克隆出的快照进行 1.将当前mmt换成下一个mmt并且取出来 2将old_mmt插入到immt的第一个 最后更新guard----其他线程看到要么旧状态，要么新状态
+        }
+
+        Ok(())
     }
 
     /// Force flush the earliest-created immutable memtable to disk
