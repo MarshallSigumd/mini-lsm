@@ -17,6 +17,7 @@
 
 use std::cmp::{self};
 use std::collections::BinaryHeap;
+use std::collections::binary_heap::PeekMut;
 
 use anyhow::Result;
 
@@ -98,18 +99,61 @@ impl<I: 'static + for<'a> StorageIterator<KeyType<'a> = KeySlice<'a>>> StorageIt
     type KeyType<'a> = KeySlice<'a>;
 
     fn key(&self) -> KeySlice {
-        unimplemented!()
+        self.current.as_ref().unwrap().1.key()
     }
 
     fn value(&self) -> &[u8] {
-        unimplemented!()
+        self.current.as_ref().unwrap().1.value()
     }
 
     fn is_valid(&self) -> bool {
-        unimplemented!()
+        self.current
+            .as_ref()
+            .map(|x| x.1.is_valid()) //因为此时可能有多个iter是对应同一个key的修改，那么此时要对所有的进行寻找，只要有一个vaild就可以
+            .unwrap_or(false)
     }
 
     fn next(&mut self) -> Result<()> {
-        unimplemented!()
+        let current = self.current.as_mut().unwrap();
+        // Pop the item out of the heap if they have the same value.
+        while let Some(mut inner_iter) = self.iters.peek_mut() {
+            debug_assert!(
+                inner_iter.1.key() >= current.1.key(),
+                "heap invariant violated"
+            );
+            if inner_iter.1.key() == current.1.key() {
+                // Case 1: an error occurred when calling `next`.
+                if let e @ Err(_) = inner_iter.1.next() {
+                    PeekMut::pop(inner_iter);
+                    return e;
+                }
+
+                // Case 2: iter is no longer valid.
+                if !inner_iter.1.is_valid() {
+                    PeekMut::pop(inner_iter);
+                }
+            } else {
+                break;
+            }
+        }
+
+        current.1.next()?;
+
+        // If the current iterator is invalid, pop it out of the heap and select the next one.
+        if !current.1.is_valid() {
+            if let Some(iter) = self.iters.pop() {
+                *current = iter;
+            }
+            return Ok(());
+        }
+
+        // Otherwise, compare with heap top and swap if necessary.此时当前key是vaild的
+        if let Some(mut inner_iter) = self.iters.peek_mut() {
+            if *current < *inner_iter {
+                std::mem::swap(&mut *inner_iter, current);
+            }
+        }
+
+        Ok(())
     }
 }
