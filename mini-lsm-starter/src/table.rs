@@ -20,6 +20,7 @@ mod builder;
 mod iterator;
 
 use anyhow::Result;
+use anyhow::anyhow;
 pub use builder::SsTableBuilder;
 use bytes::Buf;
 use bytes::BufMut;
@@ -215,6 +216,7 @@ impl SsTable {
     }
 
     /// Read a block from the disk.
+    /// 此时block随之更新
     pub fn read_block(&self, block_idx: usize) -> Result<Arc<Block>> {
         let offset = self.block_meta[block_idx].offset;
         let offset_end = self
@@ -227,9 +229,17 @@ impl SsTable {
         Ok(Arc::new(Block::decode(&block_data[..])))
     }
 
-    /// Read a block from disk, with block cache. (Day 4)
+    /// Read a block from disk, with block cache.
     pub fn read_block_cached(&self, block_idx: usize) -> Result<Arc<Block>> {
-        unimplemented!()
+        if let Some(ref block_cache) = self.block_cache {
+            let blk = block_cache
+                .try_get_with((self.id, block_idx), || self.read_block(block_idx))
+                .map_err(|e| anyhow!("{}", e))?;
+            Ok(blk)
+        } else {
+            //缓存不存在
+            self.read_block(block_idx)
+        }
     }
 
     /// Find the block that may contain `key`.

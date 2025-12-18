@@ -38,6 +38,9 @@ use crate::{
 /// Builds an SSTable from key-value pairs.
 pub struct SsTableBuilder {
     builder: BlockBuilder,
+    //因为我们在同一时间只需要“正在装修”的那一个 Block，其他的 Block 一旦装修完，就变成“冻结的字节流”存进 data 里了。
+    // 为了节省内存和简化逻辑，我们采用的是 “流水线” 模式，而不是 “全家福” 模式。
+    //此时不是并发构造，不需要Vec<BlockBuilder>
     first_key: Vec<u8>,
     last_key: Vec<u8>,
     data: Vec<u8>, //由多个编码后的数据块（Blocks）组成
