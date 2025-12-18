@@ -114,6 +114,11 @@ impl BlockIterator {
         self.key.clear();
         self.key = KeyVec::from_vec(key);
         let value_len = entry.get_u16() as usize;
+        //计算值位置范围
+        // offset：条目起始位置
+        // + SIZEOF_U16：跳过 key_len 字段（2字节）
+        // + key_len：跳过键数据
+        // + SIZEOF_U16：跳过 value_len 字段（2字节）
         let value_offset_begin = offset + SIZEOF_U16 + key_len + SIZEOF_U16;
         let value_offset_end = value_offset_begin + value_len;
         self.value_range = (value_offset_begin, value_offset_end);
