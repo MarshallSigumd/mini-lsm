@@ -69,10 +69,16 @@ impl LsmIterator {
 
     //将迭代器向前移动，跳过所有被标记为删除的条目（墓碑记录），直到找到有效的非删除条目或到达迭代器末尾
     fn move_to_non_delete(&mut self) -> Result<()> {
-        //is_vaild()检查是不是有效，is_empty()检查是否为墓碑
-        while self.is_valid() && self.inner.value().is_empty() {
+        while self.is_valid() && self.inner.is_valid() && self.inner.value().is_empty() {
             self.inner.next()?;
+            if !self.inner.is_valid() {
+                self.is_valid = false;
+                return Ok(());
+            }
         }
+        ///在 move_to_non_delete 方法中，循环条件是 while self.is_valid() && self.inner.value().is_empty()。当遇到墓碑记录（空值）时，方法会调用 self.inner.next() 来跳过它。但是，如果 SSTable 只有一个条目（如 sst2 中的键 "4" 和空值），调用 next() 会使迭代器超出有效范围，导致 self.inner 无效。但循环会继续在现在无效的迭代器上检查 self.inner.value().is_empty()，从而引发 panic。
+        ///
+        ///move_to_non_delete 方法需要在使用 next() 后检查 self.inner 是否仍然有效，并相应地更新 self.is_valid
         Ok(())
     }
 }

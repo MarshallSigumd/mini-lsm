@@ -103,6 +103,15 @@ impl StorageIterator for SsTableIterator {
 
     /// Return the `value` that's held by the underlying block iterator.
     fn value(&self) -> &[u8] {
+        if !self.blk_iter.is_valid() {
+            eprintln!("CRITICAL ERROR: SsTableIterator::value() called but blk_iter is invalid!");
+            eprintln!(
+                "blk_idx: {}, num_blocks: {}",
+                self.blk_idx,
+                self.table.num_of_blocks()
+            );
+            // 这行日志能告诉我们是不是 is_valid 说谎了
+        }
         self.blk_iter.value()
     }
 
