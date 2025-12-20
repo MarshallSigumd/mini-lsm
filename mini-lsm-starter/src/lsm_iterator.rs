@@ -15,32 +15,61 @@
 #![allow(unused_variables)] // TODO(you): remove this lint after implementing this mod
 #![allow(dead_code)] // TODO(you): remove this lint after implementing this mod
 
-use anyhow::{Ok, Result, bail};
+use bytes::Bytes;
+use std::ops::Bound;
 
+use crate::iterators::two_merge_iterator::TwoMergeIterator;
+use crate::table::SsTableIterator;
 use crate::{
     iterators::{StorageIterator, merge_iterator::MergeIterator},
     mem_table::MemTableIterator,
 };
+use anyhow::{Ok, Result, bail};
 
 /// Represents the internal type for an LSM iterator. This type will be changed across the course for multiple times.
-type LsmIteratorInner = MergeIterator<MemTableIterator>;
+/// LSM 存储引擎内部迭代器将是一个结合了内存表和 SST 中数据的迭代器
+type LsmIteratorInner =
+    TwoMergeIterator<MergeIterator<MemTableIterator>, MergeIterator<SsTableIterator>>;
 
+//LsmIterator 是 LSM 存储引擎的统一查询接口，整合了：
+// MemTable 迭代器（内存表）
+// SSTable 迭代器（磁盘表）
+// 合并逻辑（处理多版本和删除）
+// 通过边界检查和墓碑过滤，提供一致的键值对视图。
 pub struct LsmIterator {
-    inner: LsmIteratorInner,
+    inner: LsmIteratorInner, //LsmIteratorInner由mmt的迭代器和sst的迭代器合成的
+    end_bound: Bound<Bytes>, //扫描的结束边界
+    is_valid: bool,
 }
 
 impl LsmIterator {
-    pub(crate) fn new(iter: LsmIteratorInner) -> Result<Self> {
-        let mut iter = Self { inner: iter }; //此时iter可能不合法可能是墓碑
+    pub(crate) fn new(iter: LsmIteratorInner, end_bound: Bound<Bytes>) -> Result<Self> {
+        let mut iter = Self {
+            is_valid: iter.is_valid(),
+            inner: iter,
+            end_bound,
+        }; //此时iter可能不合法可能是墓碑
         iter.move_to_non_delete()?;
         Ok(iter)
     }
-}
 
-//将迭代器向前移动，跳过所有被标记为删除的条目（墓碑记录），直到找到有效的非删除条目或到达迭代器末尾
-impl LsmIterator {
+    fn next_inner(&mut self) -> Result<()> {
+        self.inner.next()?;
+        if !self.inner.is_valid() {
+            self.is_valid = false;
+            return Ok(());
+        }
+        match self.end_bound.as_ref() {
+            Bound::Unbounded => {}
+            Bound::Included(key) => self.is_valid = self.inner.key().raw_ref() <= key.as_ref(),
+            Bound::Excluded(key) => self.is_valid = self.inner.key().raw_ref() < key.as_ref(),
+        }
+        Ok(())
+    }
+
+    //将迭代器向前移动，跳过所有被标记为删除的条目（墓碑记录），直到找到有效的非删除条目或到达迭代器末尾
     fn move_to_non_delete(&mut self) -> Result<()> {
-        //is_vaild()检查是不是有效，is_emptu()检查是否为墓碑
+        //is_vaild()检查是不是有效，is_empty()检查是否为墓碑
         while self.is_valid() && self.inner.value().is_empty() {
             self.inner.next()?;
         }
@@ -52,7 +81,7 @@ impl StorageIterator for LsmIterator {
     type KeyType<'a> = &'a [u8];
 
     fn is_valid(&self) -> bool {
-        self.inner.is_valid()
+        self.is_valid
     }
 
     fn key(&self) -> &[u8] {
@@ -65,7 +94,7 @@ impl StorageIterator for LsmIterator {
 
     //用户在迭代器无效时不应调用 key 、 value 或 next 。同时，如果 next 返回错误，用户也不应再使用该迭代器。
     fn next(&mut self) -> Result<()> {
-        self.inner.next()?;
+        self.next_inner()?;
         self.move_to_non_delete()?;
         Ok(())
     }

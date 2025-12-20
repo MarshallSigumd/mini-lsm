@@ -160,7 +160,7 @@ fn range_overlap(
 
 fn key_within(user_key: &[u8], table_begin: KeySlice, table_end: KeySlice) -> bool {
     table_begin.raw_ref() <= user_key && user_key <= table_end.raw_ref()
-}//判断key是否在table的范围内，是的话返回true，不是的话返回false
+} //判断key是否在table的范围内，是的话返回true，不是的话返回false
 
 #[derive(Clone, Debug)]
 pub enum CompactionFilter {
@@ -498,7 +498,7 @@ impl LsmStorageInner {
                 }
                 return Ok(Some(value));
             }
-        }//在不可变表里面找，若有先判断是不是空，是的话返回none，不是的话就是一个值了，用some来返回类型
+        } //在不可变表里面找，若有先判断是不是空，是的话返回none，不是的话就是一个值了，用some来返回类型
 
         let mut l0_iters = Vec::with_capacity(snapshot.l0_sstables.len());
 
@@ -816,7 +816,6 @@ impl LsmStorageInner {
 
         let iter = TwoMergeIterator::create(memtable_iter, l0_iter)?;
         let iter = TwoMergeIterator::create(iter, MergeIterator::create(level_iters))?;
-
         Ok(FusedIterator::new(LsmIterator::new(
             iter,
             map_bound(upper),

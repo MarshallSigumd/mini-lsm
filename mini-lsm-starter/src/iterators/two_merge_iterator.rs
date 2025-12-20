@@ -21,6 +21,7 @@ use super::StorageIterator;
 
 /// Merges two iterators of different types into one. If the two iterators have the same key, only
 /// produce the key once and prefer the entry from A.
+/// 你已经实现了一个合并迭代器，用于合并相同类型的迭代器（即内存表迭代器）。现在我们已经实现了 SST 格式，因此我们既有磁盘上的 SST 结构，也有内存中的 memtable。当我们从存储引擎进行扫描时，我们需要将内存表迭代器和 SST 迭代器的数据合并到一个迭代器中。在这种情况下，我们需要一个 TwoMergeIterator<X, Y> 来合并两种不同类型的迭代器。
 pub struct TwoMergeIterator<A: StorageIterator, B: StorageIterator> {
     a: A,
     b: B,
@@ -43,7 +44,7 @@ impl<
     }
 
     fn skip_b(&mut self) -> Result<()> {
-        if (self.a.is_valid()) {
+        if self.a.is_valid() {
             if (self.b.is_valid() && self.a.key() == self.b.key()) {
                 self.b.next()?
             }
@@ -52,7 +53,14 @@ impl<
     }
 
     pub fn create(a: A, b: B) -> Result<Self> {
-        unimplemented!()
+        let mut iter = Self {
+            choose_a: false,
+            a,
+            b,
+        };
+        iter.skip_b()?;
+        iter.choose_a = Self::choose_a(&iter.a, &iter.b);
+        Ok(iter)
     }
 }
 

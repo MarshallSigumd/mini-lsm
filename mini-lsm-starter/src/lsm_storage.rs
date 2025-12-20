@@ -39,24 +39,26 @@ use crate::key::KeySlice;
 use crate::lsm_iterator::{FusedIterator, LsmIterator};
 use crate::manifest::Manifest;
 use crate::mem_table::MemTable;
+use crate::mem_table::map_bound;
 use crate::mvcc::LsmMvccInner;
 use crate::table::{SsTable, SsTableIterator};
-
 pub type BlockCache = moka::sync::Cache<(usize, usize), Arc<Block>>;
 
 /// Represents the state of the storage engine.
 #[derive(Clone)]
 pub struct LsmStorageState {
-    /// The current memtable.
+    /// The current memtable.在一个线程内只能有一块mmt是活跃的！
     pub memtable: Arc<MemTable>,
     /// Immutable memtables, from latest to earliest.
     pub imm_memtables: Vec<Arc<MemTable>>,
     /// L0 SSTs, from latest to earliest.
+    /// 所有SST的集合
     pub l0_sstables: Vec<usize>,
     /// SsTables sorted by key range; L1 - L_max for leveled compaction, or tiers for tiered
     /// compaction.
     pub levels: Vec<(usize, Vec<usize>)>,
     /// SST objects.
+    /// sst_id和SST的映射关系
     pub sstables: HashMap<usize, Arc<SsTable>>,
 }
 
@@ -433,25 +435,58 @@ impl LsmStorageInner {
         Ok(())
     }
 
-    /// Create an iterator over a range of keys.
-    /// 创建范围扫描迭代器，只扫描内存表中的数据，返回指定键范围内的有序数据流。
+    /// 创建支持范围查询的迭代器，扫描指定键范围内的所有有效键值对
+    /// 查询的键值对可能同时出现在mmt和sst中
     pub fn scan(
         &self,
         lower: Bound<&[u8]>,
         upper: Bound<&[u8]>,
     ) -> Result<FusedIterator<LsmIterator>> {
+        //获取快照
         let snapshot = {
             let guard = self.state.read();
             Arc::clone(&guard)
         };
 
+        //创建内存表迭代器
         let mut mmt_iters = Vec::with_capacity(snapshot.imm_memtables.len() + 1);
         mmt_iters.push(Box::new(snapshot.memtable.scan(lower, upper)));
         for mmt in snapshot.imm_memtables.iter() {
             mmt_iters.push(Box::new(mmt.scan(lower, upper)));
         }
 
-        let iter = MergeIterator::create(mmt_iters);
-        Ok(FusedIterator::new(LsmIterator::new(iter)?))
+        let mmt_iter = MergeIterator::create(mmt_iters);
+
+        //创建 SSTable迭代器（磁盘表）
+        let mut sst_iters = Vec::with_capacity(snapshot.l0_sstables.len());
+        for t_id in snapshot.l0_sstables.iter() {
+            let t = snapshot.sstables[t_id].clone();
+            let iter = match lower {
+                Bound::Included(key) => {
+                    SsTableIterator::create_and_seek_to_key(t, KeySlice::from_slice(key))?
+                }
+
+                Bound::Excluded(key) => {
+                    let mut iter =
+                        SsTableIterator::create_and_seek_to_key(t, KeySlice::from_slice(key))?;
+                    if iter.is_valid() && iter.key().raw_ref() == key {
+                        iter.next()?;
+                    }
+                    iter
+                }
+                Bound::Unbounded => SsTableIterator::create_and_seek_to_first(t)?,
+            };
+
+            sst_iters.push(Box::new(iter));
+        }
+
+        //合并所有迭代器
+        let sst_iter = MergeIterator::create(sst_iters);
+        let iter = TwoMergeIterator::create(mmt_iter, sst_iter)?;
+
+        Ok(FusedIterator::new(LsmIterator::new(
+            iter,
+            map_bound(upper),
+        )?))
     }
 }
