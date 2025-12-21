@@ -24,6 +24,7 @@ use anyhow::anyhow;
 pub use builder::SsTableBuilder;
 use bytes::Buf;
 use bytes::BufMut;
+use clap::builder::NonEmptyStringValueParser;
 pub use iterator::SsTableIterator;
 use std::fs::File;
 use std::path::Path;
@@ -158,7 +159,7 @@ pub struct SsTable {
     block_cache: Option<Arc<BlockCache>>,
     first_key: KeyBytes,
     last_key: KeyBytes,
-    // pub(crate) bloom: Option<Bloom>,
+    pub(crate) bloom: Option<Bloom>,
     // /// The maximum timestamp stored in this SST, implemented in week 3.
     // max_ts: u64,
 }
@@ -192,6 +193,7 @@ impl SsTable {
             block_meta_offset: block_meta_offset as usize,
             id,
             block_cache,
+            bloom: None,
         })
     }
 
@@ -210,7 +212,7 @@ impl SsTable {
             block_cache: None,
             first_key,
             last_key,
-            // bloom: None,
+            bloom: None,
             // max_ts: 0,
         }
     }

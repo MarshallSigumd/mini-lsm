@@ -144,6 +144,7 @@ impl SsTableBuilder {
             block_cache,
             first_key,
             last_key,
+            bloom: None,
         })
     }
 
