@@ -67,7 +67,7 @@ impl LsmIterator {
         Ok(())
     }
 
-    //将迭代器向前移动，跳过所有被标记为删除的条目（墓碑记录），直到找到有效的非删除条目或到达迭代器末尾
+    //将迭代器向前移动，跳过所有被标记为删除的条目（墓碑记录），直到找到有效的非删除条目或到达迭代器末尾,但是可能末尾刚好是失效的，此时按照对删除条目相同的操作，is_vaild改为false
     fn move_to_non_delete(&mut self) -> Result<()> {
         while self.is_valid() && self.inner.is_valid() && self.inner.value().is_empty() {
             self.inner.next()?;

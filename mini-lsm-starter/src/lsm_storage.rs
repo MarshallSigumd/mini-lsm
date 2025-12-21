@@ -15,6 +15,7 @@
 #![allow(unused_variables)] // TODO(you): remove this lint after implementing this mod
 #![allow(dead_code)] // TODO(you): remove this lint after implementing this mod
 
+use crate::table::SsTableBuilder;
 use std::collections::HashMap;
 use std::ops::Bound;
 use std::path::{Path, PathBuf};
@@ -49,17 +50,24 @@ pub type BlockCache = moka::sync::Cache<(usize, usize), Arc<Block>>;
 pub struct LsmStorageState {
     /// The current memtable.在一个线程内只能有一块mmt是活跃的！
     pub memtable: Arc<MemTable>,
+
     /// Immutable memtables, from latest to earliest.
     pub imm_memtables: Vec<Arc<MemTable>>,
+
     /// L0 SSTs, from latest to earliest.
-    /// 所有SST的集合
-    pub l0_sstables: Vec<usize>,
+    /// 第L0 sst
+    pub l0_sstables: Vec<usize>, //sst的id越大表示这个sst越新, 需要优先查询，所以可以用Vec
+
     /// SsTables sorted by key range; L1 - L_max for leveled compaction, or tiers for tiered
     /// compaction.
+    /// 从level到这一层的sst_id数组, 每一个SST由一个sst_id唯一表示，
+    /// 物理上一个SST由N个sstable组成，逻辑上一个是stables由N个ssts_id组成
     pub levels: Vec<(usize, Vec<usize>)>,
+
     /// SST objects.
     /// sst_id和SST的映射关系
     pub sstables: HashMap<usize, Arc<SsTable>>,
+    //查找第 level 层的第 idx 个 SSTable：先在levels找到第level层 （由sst_id组成），然后ssts_id.get(idx)得到sst_id,最后在sstables中得到对应的sst
 }
 
 pub enum WriteBatchRecord<T: AsRef<[u8]>> {
@@ -310,10 +318,12 @@ impl LsmStorageInner {
 
     /// Get a key from the storage. In day 7, this can be further optimized by using a bloom filter.
     pub fn get(&self, _key: &[u8]) -> Result<Option<Bytes>> {
-        let guard = self.state.read();
-        let snapshot = &guard;
+        let snapshot = {
+            let guard = self.state.read();
+            Arc::clone(&guard)
+        }; // drop global lock here
 
-        // Search on the current memtable.
+        // Search on the current memtable.当前正在活跃的mmt
         if let Some(value) = snapshot.memtable.get(_key) {
             if value.is_empty() {
                 // found tomestone, return key not exists
@@ -333,6 +343,23 @@ impl LsmStorageInner {
             }
         }
 
+        //if fail to search on mmt and imm , search on the l0_sst
+        let mut sst_iters = Vec::with_capacity(snapshot.l0_sstables.len());
+        for t in snapshot.l0_sstables.iter() {
+            sst_iters.push(Box::new(SsTableIterator::create_and_seek_to_key(
+                snapshot.sstables[t].clone(),
+                KeySlice::from_slice(_key),
+            )?));
+        }
+        let sst_iter = MergeIterator::create(sst_iters);
+        if sst_iter.is_valid()
+            && sst_iter.key() == KeySlice::from_slice(_key)
+            && !sst_iter.value().is_empty()
+        {
+            return Ok(Some(Bytes::copy_from_slice(sst_iter.value())));
+        }
+
+        //NO key, so return none
         Ok(None)
     }
 
@@ -426,8 +453,38 @@ impl LsmStorageInner {
     }
 
     /// Force flush the earliest-created immutable memtable to disk
+    /// 不可变 memtable 列表中的最后一个 memtable是最先被刷新的那个
+    /// Force flush the earliest-created immutable memtable to disk
     pub fn force_flush_next_imm_memtable(&self) -> Result<()> {
-        unimplemented!()
+        let _lock = self.state_lock.lock();
+        let flush_mmt;
+        {
+            let guard = self.state.read();
+            flush_mmt = guard.imm_memtables.last().expect("no imm mmt!").clone();
+        }
+
+        let mut builder = SsTableBuilder::new(self.options.block_size);
+        flush_mmt.flush(&mut builder)?;
+
+        let sst_id = flush_mmt.id();
+        let sst = Arc::new(builder.build(
+            sst_id,
+            Some(self.block_cache.clone()),
+            self.path_of_sst(sst_id),
+        )?);
+
+        {
+            let mut guard = self.state.write();
+            let mut snapshot = guard.as_ref().clone();
+            let mmt = snapshot.imm_memtables.pop().unwrap();
+            assert_eq!(mmt.id(), sst_id);
+            snapshot.l0_sstables.insert(0, sst_id); //建立映射
+            println!("flushed {}.sst with size={}", sst_id, sst.table_size());
+            snapshot.sstables.insert(sst_id, sst);
+            // Update the snapshot.
+            *guard = Arc::new(snapshot);
+        }
+        Ok(())
     }
 
     pub fn new_txn(&self) -> Result<()> {
@@ -443,6 +500,7 @@ impl LsmStorageInner {
         upper: Bound<&[u8]>,
     ) -> Result<FusedIterator<LsmIterator>> {
         //获取快照
+        //因为 SsTableIterator::create 涉及 I/O 操作且可能较慢，不希望在 state 临界区中执行此操作。因此应该首先读取 state 并克隆 LSM 状态快照的 Arc 。然后应该释放锁。之后遍历所有的 L0 SSTs 并为每个 SST 创建迭代器，再创建一个合并迭代器来获取数据。
         let snapshot = {
             let guard = self.state.read();
             Arc::clone(&guard)
