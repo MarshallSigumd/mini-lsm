@@ -71,10 +71,11 @@ impl LsmIterator {
     fn move_to_non_delete(&mut self) -> Result<()> {
         while self.is_valid() && self.inner.is_valid() && self.inner.value().is_empty() {
             self.inner.next()?;
-            if !self.inner.is_valid() {
-                self.is_valid = false;
-                return Ok(());
-            }
+            // if !self.inner.is_valid() {
+            //     self.is_valid = false;
+            //     return Ok(());
+            // }
+            // in  week1 day6 task3这里就不需要判断
         }
         ///在 move_to_non_delete 方法中，循环条件是 while self.is_valid() && self.inner.value().is_empty()。当遇到墓碑记录（空值）时，方法会调用 self.inner.next() 来跳过它。但是，如果 SSTable 只有一个条目（如 sst2 中的键 "4" 和空值），调用 next() 会使迭代器超出有效范围，导致 self.inner 无效。但循环会继续在现在无效的迭代器上检查 self.inner.value().is_empty()，从而引发 panic。
         ///
@@ -103,6 +104,10 @@ impl StorageIterator for LsmIterator {
         self.next_inner()?;
         self.move_to_non_delete()?;
         Ok(())
+    }
+
+    fn num_active_iterators(&self) -> usize {
+        self.inner.num_active_iterators()
     }
 }
 
@@ -165,5 +170,8 @@ impl<I: StorageIterator> StorageIterator for FusedIterator<I> {
             }
         }
         Ok(())
+    }
+    fn num_active_iterators(&self) -> usize {
+        self.iter.num_active_iterators()
     }
 }

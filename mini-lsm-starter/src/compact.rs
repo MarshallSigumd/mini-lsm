@@ -161,6 +161,13 @@ impl LsmStorageInner {
     }
 
     fn trigger_flush(&self) -> Result<()> {
+        if {
+            let state = self.state.read(); //这个放里面可以当从if出去后结束state的生命周期，解决了死锁
+            state.imm_memtables.len() >= self.options.num_memtable_limit
+        } {
+            self.force_flush_next_imm_memtable()?;
+        }
+
         Ok(())
     }
 
