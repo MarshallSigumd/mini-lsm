@@ -176,15 +176,29 @@ impl SsTable {
     /// Data Blocks: 实际的键值对数据块
     /// Block Metadata: 每个数据块的元信息
     /// Meta Offset: 元数据部分的起始偏移量（4字节，存储在文件末尾）
+    /// -----------------------------------------------------------------------------------------------------
+    // |         Block Section         |                            Meta Section                           |
+    // -----------------------------------------------------------------------------------------------------
+    // | data block | ... | data block | metadata | meta block offset | bloom filter | bloom filter offset |
+    // |                               |  varlen  |         u32       |    varlen    |        u32          |
+    // -----------------------------------------------------------------------------------------------------
+
     pub fn open(id: usize, block_cache: Option<Arc<BlockCache>>, file: FileObject) -> Result<Self> {
         let len = file.size();
-        let raw_meta_offset = file.read(len - 4, 4)?;
+
+        let raw_bloom_offset = file.read(len - 4, 4)?;
+        let bloom_offset = (&raw_bloom_offset[..]).get_u32() as u64; //bloom的在SST中的起始位l;'\
+
+        let raw_bloom = file.read(bloom_offset, len - 4 - bloom_offset)?;
+        let bloom_filter = Bloom::decode(&raw_bloom)?;
+
+        let raw_meta_offset = file.read(bloom_offset - 4, 4)?;
         //len - 4: 文件末尾前4字节存储元数据偏移量，这里的4就是1个u32等于4个byte
         let block_meta_offset = (&raw_meta_offset[..]).get_u32() as u64;
         //get_u32(): 读取大端序的32位无符号整数
-        let raw_meta = file.read(block_meta_offset, len - 4 - block_meta_offset)?;
-        //长度: len - 4 - block_meta_offset len - 4: 总长度减去末尾的4字节偏移量    再减去 block_meta_offset: 得到元数据的实际长度
+        let raw_meta = file.read(block_meta_offset, bloom_offset - 4 - block_meta_offset)?;
         let block_meta = BlockMeta::decode_block_meta(&raw_meta[..]);
+
         Ok(Self {
             file,
             first_key: block_meta.first().unwrap().first_key.clone(),
@@ -193,7 +207,7 @@ impl SsTable {
             block_meta_offset: block_meta_offset as usize,
             id,
             block_cache,
-            bloom: None,
+            bloom: Some(bloom_filter),
         })
     }
 

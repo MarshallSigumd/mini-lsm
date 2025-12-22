@@ -47,8 +47,28 @@ pub struct BlockBuilder {
     data: Vec<u8>,
     /// The expected block size.
     block_size: usize,
-    // /// The first key in the block
-    // first_key: KeyVec,
+    /// The first key in the block
+    /// 前缀压缩的核心思想是：当前 Key = 上一个 Key 的公共前缀 + 当前 Key 的独有后缀。
+    /// 我们在磁盘上不再存储完整的 Key，而是存储三个核心元数据：
+    /// shared_len：和上一个 Key 相同的前缀长度。
+    /// unshared_len：当前 Key 剩下的后缀长度。
+    /// unshared_bytes：具体的后缀内容。
+    /// 该实验中不使用shared_len，使用first_key
+    first_key: KeyVec,
+}
+
+fn overlap_len(first_key: &KeyVec, key: KeySlice) -> usize {
+    let mut overlap_len = 0;
+    loop {
+        if overlap_len >= first_key.len() || overlap_len >= key.len() {
+            break;
+        }
+        if first_key.raw_ref()[overlap_len] != key.raw_ref()[overlap_len] {
+            break;
+        }
+        overlap_len += 1;
+    }
+    overlap_len
 }
 
 impl BlockBuilder {
@@ -58,6 +78,7 @@ impl BlockBuilder {
             offsets: Vec::new(),
             data: Vec::new(),
             block_size,
+            first_key: KeyVec::new(),
         }
     }
 
@@ -82,15 +103,26 @@ impl BlockBuilder {
 
         // Add the offset of the data into the offset array.
         // 一个data section是由多个entry组成的，一个entry是按顺序由key_len（2B），key，value_len(2B)，value组成的
+        // week1 day7我们要使用first_vec来将放入的数据从value改成value-overlap_value
         self.offsets.push(self.data.len() as u16);
-        // Encode key length.
-        self.data.put_u16(key.len() as u16);
+        // week1 day7我们要使用first_vec来将放入的数据从value改成value-overlap_value
+        let overlap_len = overlap_len(&self.first_key, key);
+
+        // Encode key overlap.
+        self.data.put_u16(overlap_len as u16);
+        // Encode key length
+        self.data.put_u16((key.len() - overlap_len) as u16);
         // Encode key content.
-        self.data.put(key.raw_ref());
+        self.data.put(&key.raw_ref()[overlap_len..]);
         // Encode value length.
         self.data.put_u16(value.len() as u16);
         // Encode value content.
         self.data.put(value);
+
+        if self.first_key.is_empty() {
+            self.first_key = KeyVec::from_vec(key.raw_ref().to_vec())
+        }
+
         true
     }
 

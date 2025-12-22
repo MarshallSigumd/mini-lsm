@@ -15,6 +15,7 @@
 #![allow(unused_variables)] // TODO(you): remove this lint after implementing this mod
 #![allow(dead_code)] // TODO(you): remove this lint after implementing this mod
 
+use crate::table::Bloom;
 use crate::table::KeyBytes;
 use std::path::Path;
 use std::sync::Arc;
@@ -46,6 +47,7 @@ pub struct SsTableBuilder {
     data: Vec<u8>, //由多个编码后的数据块（Blocks）组成
     pub(crate) meta: Vec<BlockMeta>,
     block_size: usize,
+    key_hashes: Vec<u32>,
 }
 //SsTableBuilder包含目前已经encoded的数据，SsTable没有
 
@@ -59,6 +61,7 @@ impl SsTableBuilder {
             meta: Vec::new(),
             block_size,
             builder: BlockBuilder::new(block_size),
+            key_hashes: Vec::new(),
         }
     }
 
@@ -71,6 +74,8 @@ impl SsTableBuilder {
             self.first_key.clear();
             self.first_key.extend(key.raw_ref());
         }
+
+        self.key_hashes.push(farmhash::fingerprint32(key.raw_ref()));
 
         if self.builder.add(key, value) {
             self.last_key.clear();
@@ -128,6 +133,15 @@ impl SsTableBuilder {
         let meta_offset = buf.len();
         BlockMeta::encode_block_meta(&self.meta, &mut buf);
         buf.put_u32(meta_offset as u32);
+
+        let bloom = Bloom::build_from_key_hashes(
+            &self.key_hashes,
+            Bloom::bloom_bits_per_key(self.key_hashes.len(), 0.01),
+        );
+        let bloom_offset = buf.len();
+        bloom.encode(&mut buf);
+        buf.put_u32(bloom_offset as u32);
+
         let file = FileObject::create(path.as_ref(), buf)?;
 
         // Extract first and last keys before moving self.meta
@@ -144,7 +158,7 @@ impl SsTableBuilder {
             block_cache,
             first_key,
             last_key,
-            bloom: None,
+            bloom: Some(bloom),
         })
     }
 
