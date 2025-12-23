@@ -372,39 +372,54 @@ impl LsmStorageInner {
             }
         }
 
-        //if fail to search on mmt and imm , search on the l0_sst
-        let mut sst_iters = Vec::with_capacity(snapshot.l0_sstables.len());
-        for t in snapshot.l0_sstables.iter() {
-            let table = snapshot.sstables[t].clone();
+        //if fail to search on mmt and imm , search on the l0_sst，此时已经加上了bloom和L1层
+        //L0层 存在重叠
+        let mut l0_iters = Vec::with_capacity(snapshot.l0_sstables.len());
+
+        let keep_table = |key: &[u8], table: &SsTable| {
             if key_within(
-                _key,
+                key,
                 table.first_key().as_key_slice(),
                 table.last_key().as_key_slice(),
             ) {
                 if let Some(bloom) = &table.bloom {
-                    if bloom.may_contain(farmhash::fingerprint32(_key)) {
-                        sst_iters.push(Box::new(SsTableIterator::create_and_seek_to_key(
-                            table,
-                            KeySlice::from_slice(_key),
-                        )?));
+                    if bloom.may_contain(farmhash::fingerprint32(key)) {
+                        return true;
                     }
                 } else {
-                    sst_iters.push(Box::new(SsTableIterator::create_and_seek_to_key(
-                        table,
-                        KeySlice::from_slice(_key),
-                    )?));
+                    return true;
                 }
             }
-        }
-        let sst_iter = MergeIterator::create(sst_iters);
-        if sst_iter.is_valid()
-            && sst_iter.key() == KeySlice::from_slice(_key)
-            && !sst_iter.value().is_empty()
-        {
-            return Ok(Some(Bytes::copy_from_slice(sst_iter.value())));
-        }
+            false
+        };
 
-        //NO key, so return none
+        for table in snapshot.l0_sstables.iter() {
+            let table = snapshot.sstables[table].clone();
+            if keep_table(_key, &table) {
+                l0_iters.push(Box::new(SsTableIterator::create_and_seek_to_key(
+                    table,
+                    KeySlice::from_slice(_key),
+                )?));
+            }
+        }
+        let l0_iter = MergeIterator::create(l0_iters);
+
+        //L1层，不重叠
+        let mut l1_ssts = Vec::with_capacity(snapshot.levels[0].1.len());
+        for table in snapshot.levels[0].1.iter() {
+            let table = snapshot.sstables[table].clone();
+            if keep_table(_key, &table) {
+                l1_ssts.push(table);
+            }
+        }
+        let l1_iter =
+            SstConcatIterator::create_and_seek_to_key(l1_ssts, KeySlice::from_slice(_key))?;
+
+        let iter = TwoMergeIterator::create(l0_iter, l1_iter)?;
+
+        if iter.is_valid() && iter.key().raw_ref() == _key && !iter.value().is_empty() {
+            return Ok(Some(Bytes::copy_from_slice(iter.value())));
+        }
         Ok(None)
     }
 
@@ -538,6 +553,7 @@ impl LsmStorageInner {
 
     /// 创建支持范围查询的迭代器，扫描指定键范围内的所有有效键值对
     /// 查询的键值对可能同时出现在mmt和sst中
+    /// mmt+L0+L1
     pub fn scan(
         &self,
         lower: Bound<&[u8]>,
@@ -551,6 +567,7 @@ impl LsmStorageInner {
         };
 
         //创建内存表迭代器
+        // mmt层
         let mut mmt_iters = Vec::with_capacity(snapshot.imm_memtables.len() + 1);
         mmt_iters.push(Box::new(snapshot.memtable.scan(lower, upper)));
         for mmt in snapshot.imm_memtables.iter() {
@@ -560,7 +577,8 @@ impl LsmStorageInner {
         let mmt_iter = MergeIterator::create(mmt_iters);
 
         //创建 SSTable迭代器（磁盘表）
-        let mut sst_iters = Vec::with_capacity(snapshot.l0_sstables.len());
+        //L0
+        let mut l0_iters = Vec::with_capacity(snapshot.l0_sstables.len());
         for t_id in snapshot.l0_sstables.iter() {
             let t = snapshot.sstables[t_id].clone();
             if range_overlap(
@@ -584,14 +602,43 @@ impl LsmStorageInner {
                     }
                     Bound::Unbounded => SsTableIterator::create_and_seek_to_first(t)?,
                 };
-                sst_iters.push(Box::new(iter));
+                l0_iters.push(Box::new(iter));
             }
         }
 
-        //合并所有迭代器
-        let sst_iter = MergeIterator::create(sst_iters);
-        let iter = TwoMergeIterator::create(mmt_iter, sst_iter)?;
+        let l0_iter = MergeIterator::create(l0_iters);
 
+        //L1
+        let mut l1_ssts = Vec::with_capacity(snapshot.levels[0].1.len());
+        for table in snapshot.levels[0].1.iter() {
+            let table = snapshot.sstables[table].clone();
+            if range_overlap(
+                lower,
+                upper,
+                table.first_key().raw_ref(),
+                table.last_key().raw_ref(),
+            ) {
+                l1_ssts.push(table);
+            }
+        }
+
+        let l1_iter = match lower {
+            Bound::Included(key) => {
+                SstConcatIterator::create_and_seek_to_key(l1_ssts, KeySlice::from_slice(key))?
+            }
+            Bound::Excluded(key) => {
+                let mut iter =
+                    SstConcatIterator::create_and_seek_to_key(l1_ssts, KeySlice::from_slice(key))?;
+                if iter.is_valid() && iter.key().raw_ref() == key {
+                    iter.next()?;
+                }
+                iter
+            }
+            Bound::Unbounded => SstConcatIterator::create_and_seek_to_first(l1_ssts)?,
+        };
+
+        let iter = TwoMergeIterator::create(mmt_iter, l0_iter)?;
+        let iter = TwoMergeIterator::create(iter, l1_iter)?;
         Ok(FusedIterator::new(LsmIterator::new(
             iter,
             map_bound(upper),

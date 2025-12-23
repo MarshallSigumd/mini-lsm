@@ -18,6 +18,7 @@
 use bytes::Bytes;
 use std::ops::Bound;
 
+use crate::iterators::concat_iterator::SstConcatIterator;
 use crate::iterators::two_merge_iterator::TwoMergeIterator;
 use crate::table::SsTableIterator;
 use crate::{
@@ -27,9 +28,12 @@ use crate::{
 use anyhow::{Ok, Result, bail};
 
 /// Represents the internal type for an LSM iterator. This type will be changed across the course for multiple times.
-/// LSM 存储引擎内部迭代器将是一个结合了内存表和 SST 中数据的迭代器
-type LsmIteratorInner =
-    TwoMergeIterator<MergeIterator<MemTableIterator>, MergeIterator<SsTableIterator>>;
+/// 引入了 L1 层之后，L1 层的数据结构特性与 L0 层完全不同，需要专门的迭代器来优化性能。
+/// 原来的迭代器结构只处理 MemTable 和 L0 SSTable，现在的结构必须把 L1 SSTable 也纳入读取路径。
+type LsmIteratorInner = TwoMergeIterator<
+    TwoMergeIterator<MergeIterator<MemTableIterator>, MergeIterator<SsTableIterator>>, //mem和L0,L0存在重叠
+    SstConcatIterator, //L1,L1的文件不重叠
+>;
 
 //LsmIterator 是 LSM 存储引擎的统一查询接口，整合了：
 // MemTable 迭代器（内存表）
